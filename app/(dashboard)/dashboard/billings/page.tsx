@@ -24,25 +24,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAuth } from "@/hooks/use-auth";
+import { useBillings, usePayments } from "@/hooks/use-data";
+import { billingsApi, Billing } from "@/lib/api";
 import { formatCurrency, getMonthName } from "@/lib/utils";
-import { Plus, Search, Receipt, TrendingUp, Calendar, Loader2, Edit, Trash2 } from "lucide-react";
-
-// Demo data
-const demoBillings = [
-  { id: 1, tenant_id: 1, tenant_name: "John Doe", room_number: "A01", month: 6, year: 2024, rent_amount: 8000, water_bill: 500, total_amount: 8500, charge_date: "2024-06-01", status: "paid" },
-  { id: 2, tenant_id: 2, tenant_name: "Jane Smith", room_number: "A03", month: 6, year: 2024, rent_amount: 12000, water_bill: 700, total_amount: 12700, charge_date: "2024-06-01", status: "partial" },
-  { id: 3, tenant_id: 3, tenant_name: "Mike Johnson", room_number: "B01", month: 6, year: 2024, rent_amount: 10000, water_bill: 550, total_amount: 10550, charge_date: "2024-06-01", status: "unpaid" },
-  { id: 4, tenant_id: 4, tenant_name: "Sarah Wanjiku", room_number: "B03", month: 6, year: 2024, rent_amount: 15000, water_bill: 800, total_amount: 15800, charge_date: "2024-06-01", status: "paid" },
-  { id: 5, tenant_id: 5, tenant_name: "Peter Odhiambo", room_number: "C01", month: 6, year: 2024, rent_amount: 8500, water_bill: 450, total_amount: 8950, charge_date: "2024-06-01", status: "unpaid" },
-  { id: 6, tenant_id: 1, tenant_name: "John Doe", room_number: "A01", month: 5, year: 2024, rent_amount: 8000, water_bill: 480, total_amount: 8480, charge_date: "2024-05-01", status: "paid" },
-  { id: 7, tenant_id: 2, tenant_name: "Jane Smith", room_number: "A03", month: 5, year: 2024, rent_amount: 12000, water_bill: 650, total_amount: 12650, charge_date: "2024-05-01", status: "paid" },
-];
-
-type Billing = typeof demoBillings[0];
+import { Plus, Search, Receipt, TrendingUp, Loader2, Edit, Trash2 } from "lucide-react";
 
 export default function BillingsPage() {
-  const { isAdmin } = useAuth();
-  const [billings, setBillings] = useState<Billing[]>(demoBillings);
+  const { token, isAdmin } = useAuth();
+  const { data: billings, isLoading: isLoadingBillings, mutate } = useBillings(token);
+  const { data: payments } = usePayments(token);
+  
   const [searchQuery, setSearchQuery] = useState("");
   const [monthFilter, setMonthFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -50,6 +41,7 @@ export default function BillingsPage() {
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [selectedBilling, setSelectedBilling] = useState<Billing | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const currentMonth = new Date().getMonth() + 1;
   const currentYear = new Date().getFullYear();
@@ -65,7 +57,27 @@ export default function BillingsPage() {
     water_bill: "",
   });
 
-  const filteredBillings = billings.filter((billing) => {
+  const billingsList = billings || [];
+  const paymentsList = payments || [];
+
+  // Calculate payment status for each billing
+  const billingsWithStatus = billingsList.map((billing) => {
+    const billingPayments = paymentsList.filter(
+      (p) => p.monthly_charge_id === billing.id && p.status === "completed"
+    );
+    const totalPaid = billingPayments.reduce((sum, p) => sum + p.amount, 0);
+    
+    let status: "paid" | "partial" | "unpaid" = "unpaid";
+    if (totalPaid >= billing.total_amount) {
+      status = "paid";
+    } else if (totalPaid > 0) {
+      status = "partial";
+    }
+    
+    return { ...billing, status, totalPaid };
+  });
+
+  const filteredBillings = billingsWithStatus.filter((billing) => {
     const matchesSearch =
       billing.tenant_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       billing.room_number.toLowerCase().includes(searchQuery.toLowerCase());
@@ -75,39 +87,66 @@ export default function BillingsPage() {
   });
 
   const handleGenerate = async () => {
+    if (!token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    // In real app, this would call the API
-    setIsGenerateOpen(false);
-    setIsLoading(false);
+    setError(null);
+
+    try {
+      await billingsApi.generate(
+        {
+          month: parseInt(generateData.month),
+          year: parseInt(generateData.year),
+          water_bill: parseFloat(generateData.water_bill) || 0,
+        },
+        token
+      );
+
+      await mutate();
+      setIsGenerateOpen(false);
+      setGenerateData({ month: currentMonth.toString(), year: currentYear.toString(), water_bill: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to generate bills");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleEdit = async () => {
-    if (!selectedBilling) return;
+    if (!selectedBilling || !token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
 
-    setBillings(billings.map((b) =>
-      b.id === selectedBilling.id
-        ? {
-            ...b,
-            rent_amount: parseFloat(editData.rent_amount) || b.rent_amount,
-            water_bill: parseFloat(editData.water_bill) || b.water_bill,
-            total_amount:
-              (parseFloat(editData.rent_amount) || b.rent_amount) +
-              (parseFloat(editData.water_bill) || b.water_bill),
-          }
-        : b
-    ));
+    try {
+      await billingsApi.update(
+        selectedBilling.id,
+        {
+          rent_amount: parseFloat(editData.rent_amount),
+          water_bill: parseFloat(editData.water_bill),
+          total_amount: parseFloat(editData.rent_amount) + parseFloat(editData.water_bill),
+        },
+        token
+      );
 
-    setIsEditOpen(false);
-    setSelectedBilling(null);
-    setIsLoading(false);
+      await mutate();
+      setIsEditOpen(false);
+      setSelectedBilling(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update billing");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleDelete = async (billing: Billing) => {
+    if (!token) return;
+    
     if (confirm(`Delete billing for ${billing.tenant_name}?`)) {
-      setBillings(billings.filter((b) => b.id !== billing.id));
+      try {
+        await billingsApi.delete(billing.id, token);
+        await mutate();
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "Failed to delete billing");
+      }
     }
   };
 
@@ -117,13 +156,13 @@ export default function BillingsPage() {
       rent_amount: billing.rent_amount.toString(),
       water_bill: billing.water_bill.toString(),
     });
+    setError(null);
     setIsEditOpen(true);
   };
 
   const totalBilled = filteredBillings.reduce((sum, b) => sum + b.total_amount, 0);
   const paidBillings = filteredBillings.filter((b) => b.status === "paid");
   const totalPaid = paidBillings.reduce((sum, b) => sum + b.total_amount, 0);
-  const unpaidBillings = filteredBillings.filter((b) => b.status === "unpaid");
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -137,6 +176,14 @@ export default function BillingsPage() {
         return <Badge>{status}</Badge>;
     }
   };
+
+  if (isLoadingBillings) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -190,7 +237,7 @@ export default function BillingsPage() {
               <CardTitle>Monthly Bills</CardTitle>
               <CardDescription>Manage and generate monthly billings</CardDescription>
             </div>
-            <Button onClick={() => setIsGenerateOpen(true)}>
+            <Button onClick={() => { setError(null); setIsGenerateOpen(true); }}>
               <Plus className="h-4 w-4" />
               Generate Bills
             </Button>
@@ -287,6 +334,11 @@ export default function BillingsPage() {
               Generate bills for all active occupancies for the selected month.
             </DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
@@ -356,6 +408,11 @@ export default function BillingsPage() {
               Update billing for {selectedBilling?.tenant_name}
             </DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="edit_rent">Rent Amount (KES)</Label>

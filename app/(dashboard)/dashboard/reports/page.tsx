@@ -13,6 +13,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useAuth } from "@/hooks/use-auth";
+import { useArrears, useBillings, usePayments, useRooms } from "@/hooks/use-data";
 import { formatCurrency, getMonthName } from "@/lib/utils";
 import {
   BarChart3,
@@ -20,7 +22,7 @@ import {
   TrendingDown,
   AlertTriangle,
   Download,
-  Calendar,
+  Loader2,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -38,46 +40,76 @@ import {
   Cell,
 } from "recharts";
 
-// Demo data
-const monthlyIncomeData = [
-  { month: "Jan", income: 285000, collected: 270000 },
-  { month: "Feb", income: 295000, collected: 280000 },
-  { month: "Mar", income: 310000, collected: 295000 },
-  { month: "Apr", income: 305000, collected: 300000 },
-  { month: "May", income: 320000, collected: 315000 },
-  { month: "Jun", income: 335000, collected: 295000 },
-];
-
-const occupancyTrend = [
-  { month: "Jan", rate: 68 },
-  { month: "Feb", rate: 72 },
-  { month: "Mar", rate: 70 },
-  { month: "Apr", rate: 75 },
-  { month: "May", rate: 78 },
-  { month: "Jun", rate: 75 },
-];
-
-const paymentMethods = [
-  { name: "M-Pesa", value: 65, color: "#22c55e" },
-  { name: "Cash", value: 20, color: "#6b7280" },
-  { name: "Bank", value: 15, color: "#3b82f6" },
-];
-
-const arrearsData = [
-  { id: 1, tenant_name: "Peter Odhiambo", room_number: "C01", total_billed: 26850, total_paid: 2850, balance: 24000, months_overdue: 3 },
-  { id: 2, tenant_name: "James Mwangi", room_number: "A03", total_billed: 38100, total_paid: 26100, balance: 12000, months_overdue: 2 },
-  { id: 3, tenant_name: "Sarah Wanjiku", room_number: "B08", total_billed: 23700, total_paid: 15200, balance: 8500, months_overdue: 1 },
-  { id: 4, tenant_name: "Mike Johnson", room_number: "B01", total_billed: 31650, total_paid: 21100, balance: 10550, months_overdue: 1 },
-];
-
 export default function ReportsPage() {
-  const [selectedYear, setSelectedYear] = useState("2024");
+  const { token } = useAuth();
+  const { data: arrears, isLoading: isLoadingArrears } = useArrears(token);
+  const { data: billings, isLoading: isLoadingBillings } = useBillings(token);
+  const { data: payments, isLoading: isLoadingPayments } = usePayments(token);
+  const { data: rooms, isLoading: isLoadingRooms } = useRooms(token);
+  
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear().toString());
   const [selectedMonth, setSelectedMonth] = useState("all");
+
+  const isLoading = isLoadingArrears || isLoadingBillings || isLoadingPayments || isLoadingRooms;
+
+  const arrearsData = arrears || [];
+  const billingsList = billings || [];
+  const paymentsList = (payments || []).filter((p) => p.status === "completed");
+  const roomsList = rooms || [];
+
+  // Calculate monthly data for charts
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const year = parseInt(selectedYear);
+  
+  const monthlyIncomeData = months.slice(0, new Date().getMonth() + 1).map((month, index) => {
+    const monthNum = index + 1;
+    const monthBillings = billingsList.filter((b) => b.year === year && b.month === monthNum);
+    const income = monthBillings.reduce((sum, b) => sum + b.total_amount, 0);
+    
+    const monthPayments = paymentsList.filter((p) => {
+      const paymentDate = new Date(p.payment_date);
+      return paymentDate.getFullYear() === year && paymentDate.getMonth() + 1 === monthNum;
+    });
+    const collected = monthPayments.reduce((sum, p) => sum + p.amount, 0);
+    
+    return { month, income, collected };
+  });
+
+  // Calculate occupancy trend
+  const totalRooms = roomsList.length;
+  const occupiedRooms = roomsList.filter((r) => r.status === "occupied").length;
+  const currentOccupancyRate = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 100) : 0;
+
+  // Use current rate for trend (in a real app, you'd have historical data)
+  const occupancyTrend = months.slice(0, new Date().getMonth() + 1).map((month) => ({
+    month,
+    rate: currentOccupancyRate,
+  }));
+
+  // Calculate payment methods distribution
+  const mpesaPayments = paymentsList.filter((p) => p.method === "mpesa");
+  const cashPayments = paymentsList.filter((p) => p.method === "cash");
+  const bankPayments = paymentsList.filter((p) => p.method === "bank");
+  const totalPaymentCount = paymentsList.length || 1;
+
+  const paymentMethods = [
+    { name: "M-Pesa", value: Math.round((mpesaPayments.length / totalPaymentCount) * 100), color: "#22c55e" },
+    { name: "Cash", value: Math.round((cashPayments.length / totalPaymentCount) * 100), color: "#6b7280" },
+    { name: "Bank", value: Math.round((bankPayments.length / totalPaymentCount) * 100), color: "#3b82f6" },
+  ];
 
   const totalIncome = monthlyIncomeData.reduce((sum, d) => sum + d.income, 0);
   const totalCollected = monthlyIncomeData.reduce((sum, d) => sum + d.collected, 0);
-  const collectionRate = Math.round((totalCollected / totalIncome) * 100);
+  const collectionRate = totalIncome > 0 ? Math.round((totalCollected / totalIncome) * 100) : 0;
   const totalArrears = arrearsData.reduce((sum, d) => sum + d.balance, 0);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -112,7 +144,7 @@ export default function ReportsPage() {
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Income</CardTitle>
+            <CardTitle className="text-sm font-medium">Total Billed</CardTitle>
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
@@ -144,14 +176,12 @@ export default function ReportsPage() {
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Avg Occupancy</CardTitle>
+            <CardTitle className="text-sm font-medium">Occupancy Rate</CardTitle>
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-primary">
-              {Math.round(occupancyTrend.reduce((sum, d) => sum + d.rate, 0) / occupancyTrend.length)}%
-            </div>
-            <p className="text-xs text-muted-foreground">This year</p>
+            <div className="text-2xl font-bold text-primary">{currentOccupancyRate}%</div>
+            <p className="text-xs text-muted-foreground">{occupiedRooms} of {totalRooms} rooms</p>
           </CardContent>
         </Card>
       </div>
@@ -166,24 +196,30 @@ export default function ReportsPage() {
           </CardHeader>
           <CardContent>
             <div className="h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={monthlyIncomeData}>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                  <XAxis dataKey="month" className="text-xs" />
-                  <YAxis className="text-xs" tickFormatter={(value) => `${value / 1000}k`} />
-                  <Tooltip
-                    formatter={(value: number) => formatCurrency(value)}
-                    contentStyle={{
-                      backgroundColor: "hsl(var(--card))",
-                      border: "1px solid hsl(var(--border))",
-                      borderRadius: "8px",
-                    }}
-                  />
-                  <Legend />
-                  <Bar dataKey="income" name="Billed" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="collected" name="Collected" fill="hsl(var(--success))" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              {monthlyIncomeData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={monthlyIncomeData}>
+                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                    <XAxis dataKey="month" className="text-xs" />
+                    <YAxis className="text-xs" tickFormatter={(value) => `${value / 1000}k`} />
+                    <Tooltip
+                      formatter={(value: number) => formatCurrency(value)}
+                      contentStyle={{
+                        backgroundColor: "hsl(var(--card))",
+                        border: "1px solid hsl(var(--border))",
+                        borderRadius: "8px",
+                      }}
+                    />
+                    <Legend />
+                    <Bar dataKey="income" name="Billed" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="collected" name="Collected" fill="hsl(var(--success))" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  No billing data available
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -191,34 +227,40 @@ export default function ReportsPage() {
         {/* Occupancy Trend */}
         <Card>
           <CardHeader>
-            <CardTitle>Occupancy Rate Trend</CardTitle>
-            <CardDescription>Monthly occupancy percentage</CardDescription>
+            <CardTitle>Occupancy Rate</CardTitle>
+            <CardDescription>Current occupancy status</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={occupancyTrend}>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                  <XAxis dataKey="month" className="text-xs" />
-                  <YAxis className="text-xs" domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
-                  <Tooltip
-                    formatter={(value: number) => `${value}%`}
-                    contentStyle={{
-                      backgroundColor: "hsl(var(--card))",
-                      border: "1px solid hsl(var(--border))",
-                      borderRadius: "8px",
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="rate"
-                    name="Occupancy Rate"
-                    stroke="hsl(var(--primary))"
-                    strokeWidth={2}
-                    dot={{ fill: "hsl(var(--primary))" }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+              {occupancyTrend.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={occupancyTrend}>
+                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                    <XAxis dataKey="month" className="text-xs" />
+                    <YAxis className="text-xs" domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
+                    <Tooltip
+                      formatter={(value: number) => `${value}%`}
+                      contentStyle={{
+                        backgroundColor: "hsl(var(--card))",
+                        border: "1px solid hsl(var(--border))",
+                        borderRadius: "8px",
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="rate"
+                      name="Occupancy Rate"
+                      stroke="hsl(var(--primary))"
+                      strokeWidth={2}
+                      dot={{ fill: "hsl(var(--primary))" }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  No occupancy data available
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -233,31 +275,37 @@ export default function ReportsPage() {
           </CardHeader>
           <CardContent>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={paymentMethods}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={80}
-                    paddingAngle={5}
-                    dataKey="value"
-                  >
-                    {paymentMethods.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    formatter={(value: number) => `${value}%`}
-                    contentStyle={{
-                      backgroundColor: "hsl(var(--card))",
-                      border: "1px solid hsl(var(--border))",
-                      borderRadius: "8px",
-                    }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
+              {paymentsList.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={paymentMethods}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={60}
+                      outerRadius={80}
+                      paddingAngle={5}
+                      dataKey="value"
+                    >
+                      {paymentMethods.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(value: number) => `${value}%`}
+                      contentStyle={{
+                        backgroundColor: "hsl(var(--card))",
+                        border: "1px solid hsl(var(--border))",
+                        borderRadius: "8px",
+                      }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  No payment data
+                </div>
+              )}
             </div>
             <div className="mt-4 space-y-2">
               {paymentMethods.map((method) => (
@@ -289,32 +337,30 @@ export default function ReportsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Tenant</TableHead>
-                  <TableHead>Room</TableHead>
                   <TableHead>Total Billed</TableHead>
                   <TableHead>Paid</TableHead>
                   <TableHead>Balance</TableHead>
-                  <TableHead>Overdue</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {arrearsData.map((tenant) => (
-                  <TableRow key={tenant.id}>
-                    <TableCell className="font-medium">{tenant.tenant_name}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{tenant.room_number}</Badge>
-                    </TableCell>
-                    <TableCell>{formatCurrency(tenant.total_billed)}</TableCell>
-                    <TableCell className="text-success">{formatCurrency(tenant.total_paid)}</TableCell>
-                    <TableCell className="font-semibold text-destructive">
-                      {formatCurrency(tenant.balance)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={tenant.months_overdue >= 3 ? "destructive" : "warning"}>
-                        {tenant.months_overdue} month{tenant.months_overdue > 1 ? "s" : ""}
-                      </Badge>
+                {arrearsData.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} className="h-24 text-center text-muted-foreground">
+                      No tenants in arrears
                     </TableCell>
                   </TableRow>
-                ))}
+                ) : (
+                  arrearsData.map((tenant) => (
+                    <TableRow key={tenant.tenant_id}>
+                      <TableCell className="font-medium">{tenant.name}</TableCell>
+                      <TableCell>{formatCurrency(tenant["total billed"])}</TableCell>
+                      <TableCell className="text-success">{formatCurrency(tenant.total_paid)}</TableCell>
+                      <TableCell className="font-semibold text-destructive">
+                        {formatCurrency(tenant.balance)}
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </CardContent>

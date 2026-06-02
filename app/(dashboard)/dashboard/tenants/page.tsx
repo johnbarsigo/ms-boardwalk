@@ -24,30 +24,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAuth } from "@/hooks/use-auth";
+import { useTenants, useRooms, useOccupancies } from "@/hooks/use-data";
+import { tenantsApi, occupanciesApi, Tenant } from "@/lib/api";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Plus, Search, Edit, Eye, UserPlus, LogOut as LogOutIcon, Users, Loader2 } from "lucide-react";
 
-// Demo data
-const demoTenants = [
-  { id: 1, name: "John Doe", email: "john@email.com", phone: "0712345678", national_id: "12345678", room_number: "A01", occupancy_start_date: "2024-01-15", status: "active" },
-  { id: 2, name: "Jane Smith", email: "jane@email.com", phone: "0723456789", national_id: "23456789", room_number: "A03", occupancy_start_date: "2024-02-01", status: "active" },
-  { id: 3, name: "Mike Johnson", email: "mike@email.com", phone: "0734567890", national_id: "34567890", room_number: "B01", occupancy_start_date: "2024-02-15", status: "active" },
-  { id: 4, name: "Sarah Wanjiku", email: "sarah@email.com", phone: "0745678901", national_id: "45678901", room_number: "B03", occupancy_start_date: "2024-03-01", status: "active" },
-  { id: 5, name: "Peter Odhiambo", email: "peter@email.com", phone: "0756789012", national_id: "56789012", room_number: "C01", occupancy_start_date: "2024-03-15", status: "active" },
-  { id: 6, name: "Mary Njeri", email: "mary@email.com", phone: "0767890123", national_id: "67890123", room_number: null, occupancy_start_date: null, status: "past" },
-];
-
-const availableRooms = [
-  { id: 2, room_number: "A02", default_rent: 8000 },
-  { id: 5, room_number: "B02", default_rent: 10000 },
-  { id: 8, room_number: "C02", default_rent: 8500 },
-];
-
-type Tenant = typeof demoTenants[0];
-
 export default function TenantsPage() {
-  const { isAdmin } = useAuth();
-  const [tenants, setTenants] = useState<Tenant[]>(demoTenants);
+  const { token, isAdmin } = useAuth();
+  const { data: tenantsRaw, isLoading: isLoadingTenants, mutate: mutateTenants } = useTenants(token);
+  const { data: rooms, mutate: mutateRooms } = useRooms(token);
+  const { data: occupancies, mutate: mutateOccupancies } = useOccupancies(token);
+  
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "past">("all");
   const [isCheckInOpen, setIsCheckInOpen] = useState(false);
@@ -55,7 +42,9 @@ export default function TenantsPage() {
   const [isViewOpen, setIsViewOpen] = useState(false);
   const [isCheckOutOpen, setIsCheckOutOpen] = useState(false);
   const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
+  const [selectedOccupancyId, setSelectedOccupancyId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [formData, setFormData] = useState({
     name: "",
@@ -72,7 +61,19 @@ export default function TenantsPage() {
     check_out_notes: "",
   });
 
-  const filteredTenants = tenants.filter((tenant) => {
+  // Filter out string messages from tenants array
+  const tenants = (tenantsRaw?.filter((t): t is Tenant => typeof t !== "string") || []);
+  
+  // Available rooms for check-in
+  const availableRooms = (rooms || []).filter((r) => r.status === "available");
+
+  // Determine tenant status based on room_number
+  const tenantsWithStatus = tenants.map((tenant) => ({
+    ...tenant,
+    status: tenant.room_number ? "active" : "past",
+  }));
+
+  const filteredTenants = tenantsWithStatus.filter((tenant) => {
     const matchesSearch =
       tenant.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       tenant.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -82,58 +83,88 @@ export default function TenantsPage() {
   });
 
   const handleCheckIn = async () => {
+    if (!token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
 
-    const room = availableRooms.find((r) => r.id.toString() === formData.room_id);
-    const newTenant: Tenant = {
-      id: tenants.length + 1,
-      name: formData.name,
-      email: formData.email,
-      phone: formData.phone,
-      national_id: formData.national_id,
-      room_number: room?.room_number || null,
-      occupancy_start_date: new Date().toISOString().split("T")[0],
-      status: "active",
-    };
+    try {
+      const room = availableRooms.find((r) => r.id.toString() === formData.room_id);
+      
+      await tenantsApi.checkIn(
+        {
+          name: formData.name,
+          email: formData.email,
+          phone: formData.phone,
+          national_id: formData.national_id,
+          room_id: parseInt(formData.room_id),
+          agreed_rent: parseFloat(formData.agreed_rent) || room?.default_rent || 0,
+        },
+        token
+      );
 
-    setTenants([newTenant, ...tenants]);
-    setIsCheckInOpen(false);
-    setFormData({ name: "", email: "", phone: "", national_id: "", room_id: "", agreed_rent: "" });
-    setIsLoading(false);
+      await Promise.all([mutateTenants(), mutateRooms(), mutateOccupancies()]);
+      setIsCheckInOpen(false);
+      setFormData({ name: "", email: "", phone: "", national_id: "", room_id: "", agreed_rent: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to check in tenant");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleEdit = async () => {
-    if (!selectedTenant) return;
+    if (!selectedTenant || !token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
 
-    setTenants(tenants.map((t) =>
-      t.id === selectedTenant.id
-        ? { ...t, name: formData.name, email: formData.email, phone: formData.phone, national_id: formData.national_id }
-        : t
-    ));
+    try {
+      await tenantsApi.update(
+        selectedTenant.id,
+        {
+          name: formData.name,
+          email: formData.email,
+          "phone number": formData.phone,
+          national_id: formData.national_id,
+        },
+        token
+      );
 
-    setIsEditOpen(false);
-    setSelectedTenant(null);
-    setIsLoading(false);
+      await mutateTenants();
+      setIsEditOpen(false);
+      setSelectedTenant(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update tenant");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleCheckOut = async () => {
-    if (!selectedTenant) return;
+    if (!selectedOccupancyId || !token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
 
-    setTenants(tenants.map((t) =>
-      t.id === selectedTenant.id
-        ? { ...t, status: "past", room_number: null }
-        : t
-    ));
+    try {
+      await occupanciesApi.end(
+        selectedOccupancyId,
+        {
+          damages_or_dues: checkOutData.damages_or_dues ? parseFloat(checkOutData.damages_or_dues) : undefined,
+          damages_reason: checkOutData.damages_reason || undefined,
+          check_out_notes: checkOutData.check_out_notes || undefined,
+        },
+        token
+      );
 
-    setIsCheckOutOpen(false);
-    setSelectedTenant(null);
-    setCheckOutData({ damages_or_dues: "", damages_reason: "", check_out_notes: "" });
-    setIsLoading(false);
+      await Promise.all([mutateTenants(), mutateRooms(), mutateOccupancies()]);
+      setIsCheckOutOpen(false);
+      setSelectedTenant(null);
+      setSelectedOccupancyId(null);
+      setCheckOutData({ damages_or_dues: "", damages_reason: "", check_out_notes: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to check out tenant");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const openEdit = (tenant: Tenant) => {
@@ -141,11 +172,12 @@ export default function TenantsPage() {
     setFormData({
       name: tenant.name,
       email: tenant.email,
-      phone: tenant.phone,
+      phone: tenant["phone number"],
       national_id: tenant.national_id,
       room_id: "",
       agreed_rent: "",
     });
+    setError(null);
     setIsEditOpen(true);
   };
 
@@ -155,12 +187,31 @@ export default function TenantsPage() {
   };
 
   const openCheckOut = (tenant: Tenant) => {
-    setSelectedTenant(tenant);
-    setIsCheckOutOpen(true);
+    // Find the active occupancy for this tenant
+    const activeOccupancy = (occupancies || []).find(
+      (o) => o.tenant_id === tenant.id && o.end_date === null
+    );
+    
+    if (activeOccupancy) {
+      setSelectedTenant(tenant);
+      setSelectedOccupancyId(activeOccupancy.id);
+      setError(null);
+      setIsCheckOutOpen(true);
+    } else {
+      alert("Could not find active occupancy for this tenant");
+    }
   };
 
-  const activeTenants = tenants.filter((t) => t.status === "active").length;
-  const pastTenants = tenants.filter((t) => t.status === "past").length;
+  const activeTenants = tenantsWithStatus.filter((t) => t.status === "active").length;
+  const pastTenants = tenantsWithStatus.filter((t) => t.status === "past").length;
+
+  if (isLoadingTenants) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -203,7 +254,7 @@ export default function TenantsPage() {
               <CardTitle>Tenants</CardTitle>
               <CardDescription>Manage all tenants and their occupancies</CardDescription>
             </div>
-            <Button onClick={() => setIsCheckInOpen(true)}>
+            <Button onClick={() => { setError(null); setIsCheckInOpen(true); }}>
               <UserPlus className="h-4 w-4" />
               Check In Tenant
             </Button>
@@ -273,7 +324,7 @@ export default function TenantsPage() {
                       </div>
                     </div>
                   </TableCell>
-                  <TableCell>{tenant.phone}</TableCell>
+                  <TableCell>{tenant["phone number"]}</TableCell>
                   <TableCell>{tenant.national_id}</TableCell>
                   <TableCell>
                     {tenant.room_number ? (
@@ -326,6 +377,11 @@ export default function TenantsPage() {
             <DialogTitle>Check In New Tenant</DialogTitle>
             <DialogDescription>Register a new tenant and assign them a room.</DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4 max-h-96 overflow-y-auto">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
@@ -414,6 +470,11 @@ export default function TenantsPage() {
             <DialogTitle>Edit Tenant</DialogTitle>
             <DialogDescription>Update tenant information.</DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="edit_name">Full Name</Label>
@@ -480,7 +541,7 @@ export default function TenantsPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs text-muted-foreground">Phone</p>
-                  <p className="font-medium">{selectedTenant.phone}</p>
+                  <p className="font-medium">{selectedTenant["phone number"]}</p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs text-muted-foreground">National ID</p>
@@ -499,12 +560,6 @@ export default function TenantsPage() {
                   </p>
                 </div>
               </div>
-              <div className="rounded-lg bg-muted/50 p-3">
-                <p className="text-xs text-muted-foreground">Status</p>
-                <Badge variant={selectedTenant.status === "active" ? "success" : "secondary"}>
-                  {selectedTenant.status}
-                </Badge>
-              </div>
             </div>
           )}
           <DialogFooter>
@@ -521,12 +576,17 @@ export default function TenantsPage() {
           <DialogHeader>
             <DialogTitle>Check Out Tenant</DialogTitle>
             <DialogDescription>
-              End occupancy for {selectedTenant?.name}
+              End the occupancy for {selectedTenant?.name}. This will mark the room as available.
             </DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="damages">Damages or Dues (KES)</Label>
+              <Label htmlFor="damages">Damages/Outstanding Dues (KES)</Label>
               <Input
                 id="damages"
                 type="number"
@@ -539,16 +599,16 @@ export default function TenantsPage() {
               <Label htmlFor="damages_reason">Reason for Damages/Dues</Label>
               <Input
                 id="damages_reason"
-                placeholder="Optional"
+                placeholder="e.g., Broken window"
                 value={checkOutData.damages_reason}
                 onChange={(e) => setCheckOutData({ ...checkOutData, damages_reason: e.target.value })}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="checkout_notes">Check-out Notes</Label>
+              <Label htmlFor="check_out_notes">Check-out Notes</Label>
               <Input
-                id="checkout_notes"
-                placeholder="Optional notes"
+                id="check_out_notes"
+                placeholder="Any additional notes..."
                 value={checkOutData.check_out_notes}
                 onChange={(e) => setCheckOutData({ ...checkOutData, check_out_notes: e.target.value })}
               />
