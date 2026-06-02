@@ -23,32 +23,22 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAuth } from "@/hooks/use-auth";
+import { useRooms } from "@/hooks/use-data";
+import { roomsApi, Room } from "@/lib/api";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Search, Edit, Trash2, DoorOpen, Users, Loader2 } from "lucide-react";
 
-// Demo data - in real app would come from API
-const demoRooms = [
-  { id: 1, room_number: "A01", default_rent: 8000, capacity: 1, status: "occupied", current_occupants: 1, created_at: "2024-01-15" },
-  { id: 2, room_number: "A02", default_rent: 8000, capacity: 1, status: "available", current_occupants: 0, created_at: "2024-01-15" },
-  { id: 3, room_number: "A03", default_rent: 12000, capacity: 2, status: "occupied", current_occupants: 2, created_at: "2024-01-15" },
-  { id: 4, room_number: "B01", default_rent: 10000, capacity: 1, status: "occupied", current_occupants: 1, created_at: "2024-02-01" },
-  { id: 5, room_number: "B02", default_rent: 10000, capacity: 1, status: "available", current_occupants: 0, created_at: "2024-02-01" },
-  { id: 6, room_number: "B03", default_rent: 15000, capacity: 2, status: "occupied", current_occupants: 1, created_at: "2024-02-01" },
-  { id: 7, room_number: "C01", default_rent: 8500, capacity: 1, status: "occupied", current_occupants: 1, created_at: "2024-03-01" },
-  { id: 8, room_number: "C02", default_rent: 8500, capacity: 1, status: "available", current_occupants: 0, created_at: "2024-03-01" },
-];
-
-type Room = typeof demoRooms[0];
-
 export default function RoomsPage() {
-  const { isAdmin } = useAuth();
-  const [rooms, setRooms] = useState<Room[]>(demoRooms);
+  const { token, isAdmin } = useAuth();
+  const { data: rooms, isLoading: isLoadingRooms, mutate } = useRooms(token);
+  
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "available" | "occupied">("all");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [formData, setFormData] = useState({
     room_number: "",
@@ -56,61 +46,80 @@ export default function RoomsPage() {
     capacity: "1",
   });
 
-  const filteredRooms = rooms.filter((room) => {
+  const roomsList = rooms || [];
+
+  const filteredRooms = roomsList.filter((room) => {
     const matchesSearch = room.room_number.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesStatus = statusFilter === "all" || room.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
 
   const handleCreate = async () => {
+    if (!token) return;
     setIsLoading(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
     
-    const newRoom: Room = {
-      id: rooms.length + 1,
-      room_number: formData.room_number,
-      default_rent: parseFloat(formData.default_rent),
-      capacity: parseInt(formData.capacity),
-      status: "available",
-      current_occupants: 0,
-      created_at: new Date().toISOString().split("T")[0],
-    };
-    
-    setRooms([...rooms, newRoom]);
-    setIsCreateOpen(false);
-    setFormData({ room_number: "", default_rent: "", capacity: "1" });
-    setIsLoading(false);
+    try {
+      await roomsApi.create(
+        {
+          room_number: formData.room_number,
+          default_rent: parseFloat(formData.default_rent),
+          capacity: parseInt(formData.capacity),
+        },
+        token
+      );
+      
+      await mutate();
+      setIsCreateOpen(false);
+      setFormData({ room_number: "", default_rent: "", capacity: "1" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create room");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleEdit = async () => {
-    if (!selectedRoom) return;
+    if (!selectedRoom || !token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
     
-    setRooms(rooms.map((r) =>
-      r.id === selectedRoom.id
-        ? {
-            ...r,
-            room_number: formData.room_number,
-            default_rent: parseFloat(formData.default_rent),
-            capacity: parseInt(formData.capacity),
-          }
-        : r
-    ));
-    
-    setIsEditOpen(false);
-    setSelectedRoom(null);
-    setIsLoading(false);
+    try {
+      await roomsApi.update(
+        selectedRoom.id,
+        {
+          room_number: formData.room_number,
+          default_rent: parseFloat(formData.default_rent),
+          capacity: parseInt(formData.capacity),
+        },
+        token
+      );
+      
+      await mutate();
+      setIsEditOpen(false);
+      setSelectedRoom(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update room");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleDelete = async (room: Room) => {
+    if (!token) return;
+    
     if (room.status === "occupied") {
       alert("Cannot delete occupied room");
       return;
     }
+    
     if (confirm(`Delete room ${room.room_number}?`)) {
-      setRooms(rooms.filter((r) => r.id !== room.id));
+      try {
+        await roomsApi.delete(room.id, token);
+        await mutate();
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "Failed to delete room");
+      }
     }
   };
 
@@ -121,12 +130,21 @@ export default function RoomsPage() {
       default_rent: room.default_rent.toString(),
       capacity: room.capacity.toString(),
     });
+    setError(null);
     setIsEditOpen(true);
   };
 
-  const totalRooms = rooms.length;
-  const availableRooms = rooms.filter((r) => r.status === "available").length;
-  const occupiedRooms = rooms.filter((r) => r.status === "occupied").length;
+  const totalRooms = roomsList.length;
+  const availableRooms = roomsList.filter((r) => r.status === "available").length;
+  const occupiedRooms = roomsList.filter((r) => r.status === "occupied").length;
+
+  if (isLoadingRooms) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -170,7 +188,7 @@ export default function RoomsPage() {
               <CardDescription>Manage all rooms in your hostel</CardDescription>
             </div>
             {isAdmin && (
-              <Button onClick={() => setIsCreateOpen(true)}>
+              <Button onClick={() => { setError(null); setIsCreateOpen(true); }}>
                 <Plus className="h-4 w-4" />
                 Add Room
               </Button>
@@ -276,6 +294,11 @@ export default function RoomsPage() {
             <DialogTitle>Add New Room</DialogTitle>
             <DialogDescription>Create a new room in your hostel.</DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="room_number">Room Number</Label>
@@ -326,6 +349,11 @@ export default function RoomsPage() {
             <DialogTitle>Edit Room</DialogTitle>
             <DialogDescription>Update room details.</DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="edit_room_number">Room Number</Label>

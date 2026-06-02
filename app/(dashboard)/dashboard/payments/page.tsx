@@ -23,36 +23,26 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useAuth } from "@/hooks/use-auth";
+import { usePayments, useBillings, useTenants } from "@/hooks/use-data";
+import { paymentsApi, Payment, Billing, Tenant } from "@/lib/api";
 import { formatCurrency, formatDate, getMonthName } from "@/lib/utils";
-import { Plus, Search, CreditCard, TrendingUp, Loader2, Eye } from "lucide-react";
-
-// Demo data
-const demoPayments = [
-  { id: 1, tenant_id: 1, tenant_name: "John Doe", room_number: "A01", amount: 8500, method: "mpesa", mpesa_receipt: "QK7GHRJPQK", payment_date: "2024-06-05", status: "completed", billing_period: "June 2024" },
-  { id: 2, tenant_id: 4, tenant_name: "Sarah Wanjiku", room_number: "B03", amount: 15800, method: "bank", mpesa_receipt: null, payment_date: "2024-06-03", status: "completed", billing_period: "June 2024" },
-  { id: 3, tenant_id: 2, tenant_name: "Jane Smith", room_number: "A03", amount: 6000, method: "cash", mpesa_receipt: null, payment_date: "2024-06-10", status: "completed", billing_period: "June 2024" },
-  { id: 4, tenant_id: 1, tenant_name: "John Doe", room_number: "A01", amount: 8480, method: "mpesa", mpesa_receipt: "QK7ABCDEFG", payment_date: "2024-05-04", status: "completed", billing_period: "May 2024" },
-  { id: 5, tenant_id: 2, tenant_name: "Jane Smith", room_number: "A03", amount: 12650, method: "mpesa", mpesa_receipt: "QK7HIJKLMN", payment_date: "2024-05-06", status: "completed", billing_period: "May 2024" },
-];
-
-const pendingBillings = [
-  { id: 3, tenant_id: 3, tenant_name: "Mike Johnson", room_number: "B01", total_amount: 10550, billing_period: "June 2024" },
-  { id: 5, tenant_id: 5, tenant_name: "Peter Odhiambo", room_number: "C01", total_amount: 8950, billing_period: "June 2024" },
-  { id: 2, tenant_id: 2, tenant_name: "Jane Smith", room_number: "A03", total_amount: 6700, billing_period: "June 2024 (Balance)" },
-];
-
-type Payment = typeof demoPayments[0];
-type PendingBilling = typeof pendingBillings[0];
+import { Plus, Search, CreditCard, Loader2, Eye } from "lucide-react";
 
 export default function PaymentsPage() {
-  const [payments, setPayments] = useState<Payment[]>(demoPayments);
+  const { token } = useAuth();
+  const { data: payments, isLoading: isLoadingPayments, mutate } = usePayments(token);
+  const { data: billings, mutate: mutateBillings } = useBillings(token);
+  const { data: tenantsRaw } = useTenants(token);
+  
   const [searchQuery, setSearchQuery] = useState("");
   const [methodFilter, setMethodFilter] = useState<string>("all");
   const [isRecordOpen, setIsRecordOpen] = useState(false);
   const [isViewOpen, setIsViewOpen] = useState(false);
   const [selectedPayment, setSelectedPayment] = useState<Payment | null>(null);
-  const [selectedBilling, setSelectedBilling] = useState<PendingBilling | null>(null);
+  const [selectedBillingId, setSelectedBillingId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [paymentData, setPaymentData] = useState({
     billing_id: "",
@@ -62,7 +52,35 @@ export default function PaymentsPage() {
     payment_date: new Date().toISOString().split("T")[0],
   });
 
-  const filteredPayments = payments.filter((payment) => {
+  const paymentsList = payments || [];
+  const billingsList = billings || [];
+  const tenants = (tenantsRaw?.filter((t): t is Tenant => typeof t !== "string") || []);
+
+  // Calculate pending billings (unpaid or partially paid)
+  const billingsWithPaymentStatus = billingsList.map((billing) => {
+    const billingPayments = paymentsList.filter(
+      (p) => p.monthly_charge_id === billing.id && p.status === "completed"
+    );
+    const totalPaid = billingPayments.reduce((sum, p) => sum + p.amount, 0);
+    const balance = billing.total_amount - totalPaid;
+    
+    return { ...billing, totalPaid, balance };
+  });
+
+  const pendingBillings = billingsWithPaymentStatus.filter((b) => b.balance > 0);
+
+  // Enrich payments with tenant/billing info
+  const paymentsWithDetails = paymentsList.map((payment) => {
+    const billing = billingsList.find((b) => b.id === payment.monthly_charge_id);
+    return {
+      ...payment,
+      tenant_name: billing?.tenant_name || "Unknown",
+      room_number: billing?.room_number || "-",
+      billing_period: billing ? `${getMonthName(billing.month)} ${billing.year}` : "-",
+    };
+  });
+
+  const filteredPayments = paymentsWithDetails.filter((payment) => {
     const matchesSearch =
       payment.tenant_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       payment.room_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -72,57 +90,69 @@ export default function PaymentsPage() {
   });
 
   const handleRecordPayment = async () => {
+    if (!token) return;
     setIsLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    setError(null);
 
-    const billing = selectedBilling || pendingBillings.find((b) => b.id.toString() === paymentData.billing_id);
-    if (!billing) return;
+    const billingId = selectedBillingId || parseInt(paymentData.billing_id);
+    const billing = billingsWithPaymentStatus.find((b) => b.id === billingId);
+    
+    if (!billing) {
+      setError("Please select a billing");
+      setIsLoading(false);
+      return;
+    }
 
-    const newPayment: Payment = {
-      id: payments.length + 1,
-      tenant_id: billing.tenant_id,
-      tenant_name: billing.tenant_name,
-      room_number: billing.room_number,
-      amount: parseFloat(paymentData.amount),
-      method: paymentData.method as "mpesa" | "cash" | "bank",
-      mpesa_receipt: paymentData.method === "mpesa" ? paymentData.mpesa_receipt : null,
-      payment_date: paymentData.payment_date,
-      status: "completed",
-      billing_period: billing.billing_period,
-    };
+    try {
+      await paymentsApi.record(
+        {
+          tenant_id: billing.tenant_id,
+          monthly_charge_id: billing.id,
+          amount: parseFloat(paymentData.amount),
+          method: paymentData.method as "mpesa" | "cash" | "bank",
+          mpesa_receipt: paymentData.method === "mpesa" ? paymentData.mpesa_receipt : undefined,
+          payment_date: paymentData.payment_date,
+        },
+        token
+      );
 
-    setPayments([newPayment, ...payments]);
-    setIsRecordOpen(false);
-    setSelectedBilling(null);
-    setPaymentData({
-      billing_id: "",
-      amount: "",
-      method: "mpesa",
-      mpesa_receipt: "",
-      payment_date: new Date().toISOString().split("T")[0],
-    });
-    setIsLoading(false);
+      await Promise.all([mutate(), mutateBillings()]);
+      setIsRecordOpen(false);
+      setSelectedBillingId(null);
+      setPaymentData({
+        billing_id: "",
+        amount: "",
+        method: "mpesa",
+        mpesa_receipt: "",
+        payment_date: new Date().toISOString().split("T")[0],
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to record payment");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const openRecordForBilling = (billing: PendingBilling) => {
-    setSelectedBilling(billing);
+  const openRecordForBilling = (billing: typeof billingsWithPaymentStatus[0]) => {
+    setSelectedBillingId(billing.id);
     setPaymentData({
       ...paymentData,
       billing_id: billing.id.toString(),
-      amount: billing.total_amount.toString(),
+      amount: billing.balance.toString(),
     });
+    setError(null);
     setIsRecordOpen(true);
   };
 
-  const openView = (payment: Payment) => {
+  const openView = (payment: typeof paymentsWithDetails[0]) => {
     setSelectedPayment(payment);
     setIsViewOpen(true);
   };
 
-  const totalCollected = payments.reduce((sum, p) => sum + p.amount, 0);
-  const mpesaTotal = payments.filter((p) => p.method === "mpesa").reduce((sum, p) => sum + p.amount, 0);
-  const cashTotal = payments.filter((p) => p.method === "cash").reduce((sum, p) => sum + p.amount, 0);
-  const bankTotal = payments.filter((p) => p.method === "bank").reduce((sum, p) => sum + p.amount, 0);
+  const totalCollected = paymentsList.filter((p) => p.status === "completed").reduce((sum, p) => sum + p.amount, 0);
+  const mpesaTotal = paymentsList.filter((p) => p.method === "mpesa" && p.status === "completed").reduce((sum, p) => sum + p.amount, 0);
+  const cashTotal = paymentsList.filter((p) => p.method === "cash" && p.status === "completed").reduce((sum, p) => sum + p.amount, 0);
+  const bankTotal = paymentsList.filter((p) => p.method === "bank" && p.status === "completed").reduce((sum, p) => sum + p.amount, 0);
 
   const getMethodBadge = (method: string) => {
     switch (method) {
@@ -136,6 +166,14 @@ export default function PaymentsPage() {
         return <Badge>{method}</Badge>;
     }
   };
+
+  if (isLoadingPayments) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -196,12 +234,12 @@ export default function PaymentsPage() {
                   <div>
                     <p className="font-medium">{billing.tenant_name}</p>
                     <p className="text-xs text-muted-foreground">
-                      Room {billing.room_number} - {billing.billing_period}
+                      Room {billing.room_number} - {getMonthName(billing.month)} {billing.year}
                     </p>
                   </div>
                   <div className="text-right">
                     <p className="font-semibold text-destructive">
-                      {formatCurrency(billing.total_amount)}
+                      {formatCurrency(billing.balance)}
                     </p>
                     <Button
                       size="sm"
@@ -231,7 +269,7 @@ export default function PaymentsPage() {
                 <CardTitle>Payment History</CardTitle>
                 <CardDescription>All recorded payments</CardDescription>
               </div>
-              <Button onClick={() => setIsRecordOpen(true)}>
+              <Button onClick={() => { setError(null); setIsRecordOpen(true); }}>
                 <Plus className="h-4 w-4" />
                 Record Payment
               </Button>
@@ -302,28 +340,40 @@ export default function PaymentsPage() {
 
       {/* Record Payment Dialog */}
       <Dialog open={isRecordOpen} onOpenChange={setIsRecordOpen}>
-        <DialogContent onClose={() => { setIsRecordOpen(false); setSelectedBilling(null); }}>
+        <DialogContent onClose={() => { setIsRecordOpen(false); setSelectedBillingId(null); }}>
           <DialogHeader>
             <DialogTitle>Record Payment</DialogTitle>
             <DialogDescription>
-              {selectedBilling
-                ? `Record payment for ${selectedBilling.tenant_name}`
+              {selectedBillingId
+                ? `Record payment for selected billing`
                 : "Record a new payment from a tenant"}
             </DialogDescription>
           </DialogHeader>
+          {error && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
           <div className="space-y-4 py-4">
-            {!selectedBilling && (
+            {!selectedBillingId && (
               <div className="space-y-2">
                 <Label htmlFor="billing_id">Select Bill</Label>
                 <Select
                   id="billing_id"
                   value={paymentData.billing_id}
-                  onChange={(e) => setPaymentData({ ...paymentData, billing_id: e.target.value })}
+                  onChange={(e) => {
+                    const billing = pendingBillings.find((b) => b.id.toString() === e.target.value);
+                    setPaymentData({ 
+                      ...paymentData, 
+                      billing_id: e.target.value,
+                      amount: billing?.balance.toString() || ""
+                    });
+                  }}
                 >
                   <option value="">Select a pending bill</option>
                   {pendingBillings.map((billing) => (
                     <option key={billing.id} value={billing.id}>
-                      {billing.tenant_name} - Room {billing.room_number} - {formatCurrency(billing.total_amount)}
+                      {billing.tenant_name} - Room {billing.room_number} - {formatCurrency(billing.balance)}
                     </option>
                   ))}
                 </Select>
@@ -373,7 +423,7 @@ export default function PaymentsPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setIsRecordOpen(false); setSelectedBilling(null); }}>
+            <Button variant="outline" onClick={() => { setIsRecordOpen(false); setSelectedBillingId(null); }}>
               Cancel
             </Button>
             <Button onClick={handleRecordPayment} disabled={isLoading}>
@@ -394,11 +444,11 @@ export default function PaymentsPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs text-muted-foreground">Tenant</p>
-                  <p className="font-medium">{selectedPayment.tenant_name}</p>
+                  <p className="font-medium">{(selectedPayment as typeof paymentsWithDetails[0]).tenant_name}</p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs text-muted-foreground">Room</p>
-                  <p className="font-medium">{selectedPayment.room_number}</p>
+                  <p className="font-medium">{(selectedPayment as typeof paymentsWithDetails[0]).room_number}</p>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs text-muted-foreground">Amount</p>
@@ -414,7 +464,7 @@ export default function PaymentsPage() {
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <p className="text-xs text-muted-foreground">Billing Period</p>
-                  <p className="font-medium">{selectedPayment.billing_period}</p>
+                  <p className="font-medium">{(selectedPayment as typeof paymentsWithDetails[0]).billing_period}</p>
                 </div>
               </div>
               {selectedPayment.mpesa_receipt && (
@@ -425,7 +475,9 @@ export default function PaymentsPage() {
               )}
               <div className="rounded-lg bg-muted/50 p-3">
                 <p className="text-xs text-muted-foreground">Status</p>
-                <Badge variant="success">Completed</Badge>
+                <Badge variant={selectedPayment.status === "completed" ? "success" : "secondary"}>
+                  {selectedPayment.status}
+                </Badge>
               </div>
             </div>
           )}
