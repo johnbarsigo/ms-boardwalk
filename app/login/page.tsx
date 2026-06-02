@@ -122,7 +122,7 @@ export default function LoginPage() {
       </main>
 
       <footer className="p-4 text-center text-sm text-muted-foreground">
-        Boardwalk Hostel Management System
+        Boardwalk Ltd Management System by Barsigo
       </footer>
     </div>
   );
