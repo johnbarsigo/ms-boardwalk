@@ -3,3 +3,5 @@ server/MISSING_FEATURES.md
 server/README.md
 server/.env
 server/.flaskenv
+.next
+node_modules

@@ -59,7 +59,7 @@ class RecordPayment ( Resource ) :
         if data [ "amount" ] <= 0 :
             return { "error" : "Invalid payment amount." }, 422
         
-        if data [ "method" ] not in [ "mpesa", "card", "cash" ] :
+        if data [ "method" ] not in [ "mpesa", "bank", "cash" ] :
             return { "error" : "Invalid payment method." }, 422
         
         payment = Payment (

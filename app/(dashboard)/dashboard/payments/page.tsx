@@ -398,7 +398,7 @@ export default function PaymentsPage() {
               >
                 <option value="mpesa">M-Pesa</option>
                 <option value="cash">Cash</option>
-                <option value="bank">Bank Transfer</option>
+                <option value="bank">Bank</option>
               </Select>
             </div>
             {paymentData.method === "mpesa" && (
